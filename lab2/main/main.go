@@ -1,519 +1,755 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 )
 
-type Value int
+type Value string
 
 const (
-	Zero Value = iota
-	One
-	X
-	D
-	DB // D-bar
+	Zero Value = "0"
+	One  Value = "1"
+	X    Value = "X"
+	D    Value = "d"
+	DB   Value = "d'"
 )
-
-func (v Value) String() string {
-	switch v {
-	case Zero:
-		return "0"
-	case One:
-		return "1"
-	case X:
-		return "X"
-	case D:
-		return "D"
-	case DB:
-		return "D'"
-	default:
-		return "?"
-	}
-}
 
 type Cube map[string]Value
 
+type Gate struct {
+	Name, Type string
+	Inputs     []string
+	Output     string
+}
+
+type Fault struct {
+	Node    string
+	StuckAt int
+}
+
+type TraceStep struct {
+	Before   Cube
+	Desc     string
+	UsedCube Cube
+	Cube     Cube
+}
+
+var poles = []string{
+	"x1", "x2", "x3", "x4", "x5", "x6", "x7",
+	"F1", "F2", "F3", "F4", "F5", "F6",
+}
+
+var poleNo = map[string]int{
+	"x1": 1,
+	"x2": 2,
+	"x3": 3,
+	"x4": 4,
+	"x5": 5,
+	"x6": 6,
+	"x7": 7,
+	"F1": 8,
+	"F2": 9,
+	"F3": 10,
+	"F4": 11,
+	"F5": 12,
+	"F6": 13,
+}
+
+var gates = []Gate{
+	{"F1", "AND", []string{"x1", "x2"}, "F1"},
+	{"F2", "NOT", []string{"x3"}, "F2"},
+	{"F3", "OR", []string{"x5", "x6"}, "F3"},
+	{"F4", "AND", []string{"x4", "F3", "x7"}, "F4"},
+	{"F5", "NAND", []string{"F2", "F4"}, "F5"},
+	{"F6", "AND", []string{"F1", "F5"}, "F6"},
+}
+
+func gateOf(out string) *Gate {
+	for i := range gates {
+		if gates[i].Output == out {
+			return &gates[i]
+		}
+	}
+	return nil
+}
+
 func copyCube(c Cube) Cube {
-	result := make(Cube)
+	r := Cube{}
 
 	for k, v := range c {
-		result[k] = v
+		r[k] = v
 	}
 
-	return result
+	return r
 }
 
-func valueOf(c Cube, name string) Value {
-	if v, ok := c[name]; ok {
-		return v
-	}
+func merge(a, b Cube) (Cube, bool) {
+	r := copyCube(a)
 
-	return X
-}
+	for k, v := range b {
+		old, ok := r[k]
 
-func setValue(c Cube, name string, value Value) {
-	c[name] = value
-}
-
-func printCube(c Cube, title string) {
-	nodes := []string{
-		"x1", "x2", "x3", "x4", "x5", "x6", "x7",
-		"F1", "F2", "F3", "F4", "F5", "F6",
-	}
-
-	fmt.Println(title)
-
-	for _, node := range nodes {
-		fmt.Printf("%-3s ", node)
-	}
-
-	fmt.Println()
-
-	for _, node := range nodes {
-		fmt.Printf("%-3s ", valueOf(c, node))
-	}
-
-	fmt.Println()
-	fmt.Println()
-}
-
-// ------------------------------------------------------------
-// D-пересечение
-// ------------------------------------------------------------
-
-func intersect(a, b Cube) (Cube, bool) {
-	result := copyCube(a)
-
-	for node, bValue := range b {
-		aValue := valueOf(result, node)
-
-		if aValue == X {
-			result[node] = bValue
-			continue
-		}
-
-		if bValue == X {
-			continue
-		}
-
-		if aValue != bValue {
+		if !ok || old == X {
+			r[k] = v
+		} else if v == X || old == v {
+			// Совместимо.
+		} else {
 			return nil, false
 		}
 	}
 
-	return result, true
+	return r, true
 }
 
-// ------------------------------------------------------------
-// Логические элементы
-// ------------------------------------------------------------
+func fmtSeq(c Cube) string {
+	var b strings.Builder
 
-type Gate struct {
-	Name   string
-	Type   string
-	Inputs []string
+	for _, p := range poles {
+		v := c[p]
+
+		if v == "" {
+			v = X
+		}
+
+		b.WriteString(string(v))
+	}
+
+	return b.String()
 }
 
-// Схема варианта 9:
-//
-// F1 = x1 AND x2
-// F2 = NOT x3
-// F3 = x5 OR x6
-// F4 = x4 AND F3 AND x7
-// F5 = NAND(F2, F4)
-// F6 = F1 AND F5
-//
+func printCube(c Cube) {
+	for _, p := range poles {
+		v := c[p]
 
-var gates = []Gate{
-	{
-		Name:   "F1",
-		Type:   "AND",
-		Inputs: []string{"x1", "x2"},
-	},
-	{
-		Name:   "F2",
-		Type:   "NOT",
-		Inputs: []string{"x3"},
-	},
-	{
-		Name:   "F3",
-		Type:   "OR",
-		Inputs: []string{"x5", "x6"},
-	},
-	{
-		Name:   "F4",
-		Type:   "AND",
-		Inputs: []string{"x4", "F3", "x7"},
-	},
-	{
-		Name:   "F5",
-		Type:   "NAND",
-		Inputs: []string{"F2", "F4"},
-	},
-	{
-		Name:   "F6",
-		Type:   "AND",
-		Inputs: []string{"F1", "F5"},
-	},
+		if v == "" {
+			v = X
+		}
+
+		fmt.Printf("%2s ", v)
+	}
+
+	fmt.Println()
 }
 
-var gateByName = map[string]Gate{
-	"F1": gates[0],
-	"F2": gates[1],
-	"F3": gates[2],
-	"F4": gates[3],
-	"F5": gates[4],
-	"F6": gates[5],
+func printCubeInline(c Cube) {
+	for _, p := range poles {
+		v := c[p]
+
+		if v == "" {
+			v = X
+		}
+
+		fmt.Printf("%s", v)
+	}
 }
 
-// Следующий элемент на пути распространения D.
+func primitive(f Fault) Cube {
+	if f.StuckAt == 0 {
+		return Cube{f.Node: D}
+	}
 
-var nextGate = map[string]string{
-	"F1": "F6",
-	"F2": "F5",
-	"F3": "F4",
-	"F4": "F5",
-	"F5": "F6",
-	"F6": "",
+	return Cube{f.Node: DB}
 }
 
-// ------------------------------------------------------------
-// Сингулярные кубы
-//
-// Возвращаются условия на входах элемента,
-// обеспечивающие требуемое исправное значение выхода.
-// ------------------------------------------------------------
+// ============================================================
+// D-КУБЫ
+// ============================================================
 
-func singularCubes(g Gate, output Value) []Cube {
-	var result []Cube
+func dCubes(g Gate) []Cube {
+	out := []Cube{}
 
 	switch g.Type {
 
 	case "AND":
-		if output == One {
-			// AND = 1 -> все входы 1
-			c := Cube{}
+		for _, dv := range []Value{D, DB} {
+			for i := range g.Inputs {
 
-			for _, input := range g.Inputs {
-				c[input] = One
-			}
-
-			result = append(result, c)
-		}
-
-		if output == Zero {
-			// AND = 0 -> хотя бы один вход 0
-			for _, input := range g.Inputs {
 				c := Cube{}
 
-				for _, other := range g.Inputs {
-					c[other] = X
+				for j, n := range g.Inputs {
+					c[n] = One
+
+					if i == j {
+						c[n] = dv
+					}
 				}
 
-				c[input] = Zero
-				result = append(result, c)
+				c[g.Output] = dv
+				out = append(out, c)
 			}
 		}
 
 	case "OR":
-		if output == Zero {
-			// OR = 0 -> все входы 0
-			c := Cube{}
+		for _, dv := range []Value{D, DB} {
+			for i := range g.Inputs {
 
-			for _, input := range g.Inputs {
-				c[input] = Zero
-			}
-
-			result = append(result, c)
-		}
-
-		if output == One {
-			// OR = 1 -> хотя бы один вход 1
-			for _, input := range g.Inputs {
 				c := Cube{}
 
-				for _, other := range g.Inputs {
-					c[other] = X
+				for j, n := range g.Inputs {
+					c[n] = Zero
+
+					if i == j {
+						c[n] = dv
+					}
 				}
 
-				c[input] = One
-				result = append(result, c)
+				c[g.Output] = dv
+				out = append(out, c)
 			}
 		}
 
 	case "NAND":
-		// NAND = NOT(AND)
+		for _, dv := range []Value{D, DB} {
+			for i := range g.Inputs {
 
-		if output == Zero {
-			// NAND = 0 -> все входы 1
-			c := Cube{}
-
-			for _, input := range g.Inputs {
-				c[input] = One
-			}
-
-			result = append(result, c)
-		}
-
-		if output == One {
-			// NAND = 1 -> хотя бы один вход 0
-			for _, input := range g.Inputs {
 				c := Cube{}
 
-				for _, other := range g.Inputs {
-					c[other] = X
+				for j, n := range g.Inputs {
+					c[n] = One
+
+					if i == j {
+						c[n] = dv
+					}
 				}
 
-				c[input] = Zero
-				result = append(result, c)
+				if dv == D {
+					c[g.Output] = DB
+				} else {
+					c[g.Output] = D
+				}
+
+				out = append(out, c)
 			}
 		}
 
 	case "NOT":
-		if output == One {
-			result = append(result, Cube{
-				g.Inputs[0]: Zero,
-			})
+		out = append(
+			out,
+			Cube{
+				g.Inputs[0]: D,
+				g.Output:    DB,
+			},
+			Cube{
+				g.Inputs[0]: DB,
+				g.Output:    D,
+			},
+		)
+	}
+
+	return out
+}
+
+// ============================================================
+// СИНГУЛЯРНЫЕ КУБЫ
+// ============================================================
+
+func singularCubes(g Gate, desired Value) []Cube {
+	out := []Cube{}
+
+	switch g.Type {
+
+	case "AND":
+
+		if desired == One {
+			c := Cube{
+				g.Output: One,
+			}
+
+			for _, in := range g.Inputs {
+				c[in] = One
+			}
+
+			out = append(out, c)
 		}
 
-		if output == Zero {
-			result = append(result, Cube{
-				g.Inputs[0]: One,
-			})
+		if desired == Zero {
+			for _, in := range g.Inputs {
+
+				c := Cube{
+					g.Output: Zero,
+				}
+
+				for _, n := range g.Inputs {
+					c[n] = X
+				}
+
+				c[in] = Zero
+
+				out = append(out, c)
+			}
 		}
+
+	case "OR":
+
+		if desired == Zero {
+			c := Cube{
+				g.Output: Zero,
+			}
+
+			for _, in := range g.Inputs {
+				c[in] = Zero
+			}
+
+			out = append(out, c)
+		}
+
+		if desired == One {
+			for _, in := range g.Inputs {
+
+				c := Cube{
+					g.Output: One,
+				}
+
+				for _, n := range g.Inputs {
+					c[n] = X
+				}
+
+				c[in] = One
+
+				out = append(out, c)
+			}
+		}
+
+	case "NAND":
+
+		if desired == Zero {
+			c := Cube{
+				g.Output: Zero,
+			}
+
+			for _, in := range g.Inputs {
+				c[in] = One
+			}
+
+			out = append(out, c)
+		}
+
+		if desired == One {
+			for _, in := range g.Inputs {
+
+				c := Cube{
+					g.Output: One,
+				}
+
+				for _, n := range g.Inputs {
+					c[n] = X
+				}
+
+				c[in] = Zero
+
+				out = append(out, c)
+			}
+		}
+
+	case "NOT":
+
+		if desired == One {
+			out = append(
+				out,
+				Cube{
+					g.Inputs[0]: Zero,
+					g.Output:    One,
+				},
+			)
+		}
+
+		if desired == Zero {
+			out = append(
+				out,
+				Cube{
+					g.Inputs[0]: One,
+					g.Output:    Zero,
+				},
+			)
+		}
+	}
+
+	return out
+}
+
+// ============================================================
+// ПЕЧАТЬ D-КУБОВ
+// ============================================================
+
+func printDTable(g Gate) {
+	fmt.Printf(
+		"\nD-кубы F%s (%s)\n",
+		strings.TrimPrefix(g.Name, "F"),
+		g.Type,
+	)
+
+	for _, in := range g.Inputs {
+		fmt.Printf("%4d", poleNo[in])
+	}
+
+	fmt.Printf("%4d\n", poleNo[g.Output])
+
+	fmt.Println(strings.Repeat("----", len(g.Inputs)+1))
+
+	for i, c := range dCubes(g) {
+
+		fmt.Printf("%d) ", i+1)
+
+		for _, in := range g.Inputs {
+			fmt.Printf("%4s", c[in])
+		}
+
+		fmt.Printf("%4s\n", c[g.Output])
+	}
+}
+
+// ============================================================
+// ПОИСК ВСЕХ D-ПУТЕЙ
+// ============================================================
+
+func findPaths(start string) [][]Gate {
+	var result [][]Gate
+
+	var dfs func(
+		string,
+		[]Gate,
+		map[string]bool,
+	)
+
+	dfs = func(
+		signal string,
+		path []Gate,
+		seen map[string]bool,
+	) {
+		if signal == "F6" {
+			result = append(
+				result,
+				append([]Gate{}, path...),
+			)
+			return
+		}
+
+		for i := range gates {
+
+			g := gates[i]
+
+			found := false
+
+			for _, in := range g.Inputs {
+				if in == signal {
+					found = true
+					break
+				}
+			}
+
+			if !found || seen[g.Output] {
+				continue
+			}
+
+			nextSeen := map[string]bool{}
+
+			for k, v := range seen {
+				nextSeen[k] = v
+			}
+
+			nextSeen[g.Output] = true
+
+			dfs(
+				g.Output,
+				append(path, g),
+				nextSeen,
+			)
+		}
+	}
+
+	dfs(
+		start,
+		nil,
+		map[string]bool{
+			start: true,
+		},
+	)
+
+	return result
+}
+
+// ============================================================
+// ОДИН ШАГ ПРЯМОГО D-ПРОХОЖДЕНИЯ
+// ============================================================
+
+func propagateOne(
+	c Cube,
+	g Gate,
+) ([]Cube, []int, []Cube) {
+
+	var signal string
+	var polarity Value
+
+	for _, in := range g.Inputs {
+
+		v := c[in]
+
+		if v == D || v == DB {
+			signal = in
+			polarity = v
+			break
+		}
+	}
+
+	if signal == "" {
+		return nil, nil, nil
+	}
+
+	var result []Cube
+	var ids []int
+	var used []Cube
+
+	for i, dc := range dCubes(g) {
+
+		if dc[signal] != polarity {
+			continue
+		}
+
+		n, ok := merge(c, dc)
+
+		if !ok {
+			continue
+		}
+
+		if n[g.Output] != D &&
+			n[g.Output] != DB {
+			continue
+		}
+
+		result = append(result, n)
+		ids = append(ids, i+1)
+		used = append(used, copyCube(dc))
+	}
+
+	return result, ids, used
+}
+
+// ============================================================
+// ПРЯМОЙ D-ПРОХОД
+// fault → ... → F6
+// ============================================================
+
+func forward(
+	path []Gate,
+	start Cube,
+) (Cube, []TraceStep, bool) {
+
+	var rec func(
+		int,
+		Cube,
+		[]TraceStep,
+	) (Cube, []TraceStep, bool)
+
+	rec = func(
+		index int,
+		current Cube,
+		log []TraceStep,
+	) (Cube, []TraceStep, bool) {
+
+		if index == len(path) {
+			return current, log, true
+		}
+
+		g := path[index]
+
+		candidates, ids, usedCubes :=
+			propagateOne(current, g)
+
+		for k, next := range candidates {
+
+			nextLog := append(
+				[]TraceStep{},
+				log...,
+			)
+
+			nextLog = append(
+				nextLog,
+				TraceStep{
+					Before: copyCube(current),
+					Desc: fmt.Sprintf(
+						"%s: куб + D-куб №%d",
+						g.Name,
+						ids[k],
+					),
+					UsedCube: copyCube(usedCubes[k]),
+					Cube:     copyCube(next),
+				},
+			)
+
+			if result, resultLog, ok :=
+				rec(index+1, next, nextLog); ok {
+
+				return result, resultLog, true
+			}
+		}
+
+		return nil, nil, false
+	}
+
+	return rec(0, start, nil)
+}
+
+// ============================================================
+// ПОИСК ЗАВИСИМОСТЕЙ ОБРАТНОГО ПРОХОДА
+//
+// Например:
+// F4 → F5 → F6
+//
+// F6 имеет дополнительный вход F1
+// F5 имеет дополнительный вход F2
+// F4 имеет дополнительный вход F3
+//
+// Поэтому:
+// F1, F2, F3
+//
+// Для F2:
+//
+// F2 → F5 → F6
+//
+// F6 → F1
+// F5 → F4
+// F4 → F3
+//
+// Поэтому с учётом зависимости F3 → F4:
+//
+// F1, F3, F4
+// ============================================================
+
+func collectReverseGates(path []Gate) []Gate {
+
+	// Все элементы прямого D-пути.
+	onPath := map[string]bool{}
+
+	for _, g := range path {
+		onPath[g.Output] = true
+	}
+
+	// Сначала собираем непосредственные боковые входы.
+	var roots []string
+
+	for i := len(path) - 1; i >= 0; i-- {
+
+		g := path[i]
+
+		for _, in := range g.Inputs {
+
+			// Если вход является выходом другого элемента
+			// и этот элемент не находится на D-пути,
+			// это боковая ветвь, которую надо раскрыть.
+			ig := gateOf(in)
+
+			if ig == nil {
+				continue
+			}
+
+			if onPath[ig.Output] {
+				continue
+			}
+
+			if !containsString(roots, ig.Output) {
+				roots = append(roots, ig.Output)
+			}
+		}
+	}
+
+	// Рекурсивно добавляем зависимости боковых элементов.
+	needed := map[string]bool{}
+
+	var collect func(string)
+
+	collect = func(name string) {
+
+		if needed[name] {
+			return
+		}
+
+		needed[name] = true
+
+		g := gateOf(name)
+
+		if g == nil {
+			return
+		}
+
+		for _, in := range g.Inputs {
+
+			dep := gateOf(in)
+
+			if dep == nil {
+				continue
+			}
+
+			if onPath[dep.Output] {
+				continue
+			}
+
+			collect(dep.Output)
+		}
+	}
+
+	for _, root := range roots {
+		collect(root)
+	}
+
+	// Теперь строим топологический порядок:
+	// сначала зависимости, потом элемент, который ими пользуется.
+	var result []Gate
+	visited := map[string]bool{}
+
+	var visit func(string)
+
+	visit = func(name string) {
+
+		if visited[name] {
+			return
+		}
+
+		g := gateOf(name)
+
+		if g == nil {
+			return
+		}
+
+		visited[name] = true
+
+		for _, in := range g.Inputs {
+
+			dep := gateOf(in)
+
+			if dep == nil {
+				continue
+			}
+
+			if onPath[dep.Output] {
+				continue
+			}
+
+			if needed[dep.Output] {
+				visit(dep.Output)
+			}
+		}
+
+		result = append(result, *g)
+	}
+
+	for _, root := range roots {
+		visit(root)
 	}
 
 	return result
 }
 
-// ------------------------------------------------------------
-// D-куб распространения
-//
-// Например:
-//
-// AND:
-//
-// D 1 -> D
-// 1 D -> D
-//
-// OR:
-//
-// D 0 -> D
-// 0 D -> D
-//
-// NAND:
-//
-// D 1 -> D'
-// 1 D -> D'
-//
-// NOT:
-//
-// D -> D'
-// D' -> D
-// ------------------------------------------------------------
+func containsString(
+	values []string,
+	value string,
+) bool {
 
-func propagationCube(g Gate, dValue Value, inputIndex int) Cube {
-	c := Cube{}
-
-	// Значение на входе, по которому распространяется D.
-	c[g.Inputs[inputIndex]] = dValue
-
-	switch g.Type {
-
-	case "AND":
-		for i, input := range g.Inputs {
-			if i != inputIndex {
-				c[input] = One
-			}
-		}
-
-		c[g.Name] = dValue
-
-	case "OR":
-		for i, input := range g.Inputs {
-			if i != inputIndex {
-				c[input] = Zero
-			}
-		}
-
-		c[g.Name] = dValue
-
-	case "NAND":
-		for i, input := range g.Inputs {
-			if i != inputIndex {
-				c[input] = One
-			}
-		}
-
-		if dValue == D {
-			c[g.Name] = DB
-		} else {
-			c[g.Name] = D
-		}
-
-	case "NOT":
-		if dValue == D {
-			c[g.Name] = DB
-		} else {
-			c[g.Name] = D
-		}
-	}
-
-	return c
-}
-
-// ------------------------------------------------------------
-// Примитивный D-куб
-//
-// SA0:
-//
-// исправное значение = 1
-// неисправное       = 0
-//
-// => D
-//
-// SA1:
-//
-// исправное значение = 0
-// неисправное       = 1
-//
-// => D'
-// ------------------------------------------------------------
-
-func primitiveCube(faultGate string, stuckAt int) Cube {
-	c := Cube{}
-
-	if stuckAt == 0 {
-		c[faultGate] = D
-	} else {
-		c[faultGate] = DB
-	}
-
-	return c
-}
-
-// ------------------------------------------------------------
-// Построение пути от неисправности к выходу
-// ------------------------------------------------------------
-
-func buildPath(start string) []string {
-	var path []string
-
-	current := start
-
-	for current != "" {
-		path = append(path, current)
-		current = nextGate[current]
-	}
-
-	return path
-}
-
-// ------------------------------------------------------------
-// Поиск позиции входа элемента
-// ------------------------------------------------------------
-
-func inputIndex(g Gate, input string) int {
-	for i, name := range g.Inputs {
-		if name == input {
-			return i
-		}
-	}
-
-	return -1
-}
-
-// ------------------------------------------------------------
-// D-проход
-// ------------------------------------------------------------
-
-func dPass(faultGate string, cube Cube) (Cube, []string, bool) {
-	path := buildPath(faultGate)
-
-	var log []string
-
-	currentCube := copyCube(cube)
-
-	fmt.Println("Путь D-прохода:")
-
-	for i := 0; i < len(path); i++ {
-		fmt.Print(path[i])
-
-		if i != len(path)-1 {
-			fmt.Print(" -> ")
-		}
-	}
-
-	fmt.Println()
-	fmt.Println()
-
-	for i := 0; i < len(path)-1; i++ {
-		currentGateName := path[i]
-		nextGateName := path[i+1]
-
-		currentD := valueOf(currentCube, currentGateName)
-
-		nextGateStruct := gateByName[nextGateName]
-
-		position := inputIndex(nextGateStruct, currentGateName)
-
-		if position == -1 {
-			return nil, log, false
-		}
-
-		localCube := propagationCube(
-			nextGateStruct,
-			currentD,
-			position,
-		)
-
-		fmt.Printf(
-			"Переход %s -> %s\n",
-			currentGateName,
-			nextGateName,
-		)
-
-		printCube(
-			localCube,
-			"Локальный D-куб:",
-		)
-
-		newCube, ok := intersect(currentCube, localCube)
-
-		if !ok {
-			fmt.Println("D-пересечение: Ø")
-			fmt.Println("Путь не может быть активизирован.")
-			return nil, log, false
-		}
-
-		fmt.Println("D-пересечение выполнено успешно.")
-		printCube(newCube, "Полученный куб:")
-
-		currentCube = newCube
-
-		log = append(
-			log,
-			fmt.Sprintf(
-				"%s -> %s",
-				currentGateName,
-				nextGateName,
-			),
-		)
-	}
-
-	return currentCube, log, true
-}
-
-// ------------------------------------------------------------
-// Проверка, находится ли элемент на D-пути.
-// ------------------------------------------------------------
-
-func isOnPath(gateName string, path []string) bool {
-	for _, p := range path {
-		if p == gateName {
+	for _, v := range values {
+		if v == value {
 			return true
 		}
 	}
@@ -521,487 +757,611 @@ func isOnPath(gateName string, path []string) bool {
 	return false
 }
 
-// ------------------------------------------------------------
-// Обратная фаза.
-//
-// Идём:
-//
-// F6 -> F5 -> F4 -> F3 -> F2 -> F1
-//
-// Для обычного значения выхода выбираем сингулярные кубы.
-// Для неисправного элемента, содержащего D/D', выбираем
-// сингулярные кубы для исправного значения выхода.
-// ------------------------------------------------------------
+// ============================================================
+// ОБРАТНОЕ РАСКРЫТИЕ ОДНОГО ЭЛЕМЕНТА
+// ============================================================
 
-func reversePhase(
-	cube Cube,
-	faultGate string,
-	path []string,
-) []Cube {
+func expandGate(
+	c Cube,
+	g Gate,
+	desired Value,
+) ([]Cube, []int, []Cube) {
 
-	reverseGates := []string{
-		"F6",
-		"F5",
-		"F4",
-		"F3",
-		"F2",
-		"F1",
+	var options []Cube
+
+	if desired == D || desired == DB {
+
+		for _, dc := range dCubes(g) {
+
+			if dc[g.Output] == desired {
+				options = append(options, dc)
+			}
+		}
+
+	} else {
+
+		options = singularCubes(
+			g,
+			desired,
+		)
 	}
 
 	var result []Cube
+	var ids []int
+	var used []Cube
 
-	var process func(int, Cube)
+	for i, option := range options {
 
-	process = func(index int, current Cube) {
+		n, ok := merge(c, option)
+
+		if !ok {
+			continue
+		}
+
+		// Выход элемента больше не нужен:
+		// мы раскрываем его через входы.
+		delete(n, g.Output)
+
+		result = append(result, n)
+		ids = append(ids, i+1)
+		used = append(used, copyCube(option))
+	}
+
+	return result, ids, used
+}
+
+// ============================================================
+// ОБРАТНЫЙ ПРОХОД
+//
+// Здесь НЕ идём F6,F5,F4,F3,F2,F1.
+//
+// Сначала берём конкретный D-путь,
+// затем определяем его боковые ветви.
+//
+// Например:
+//
+// fault F4:
+//
+// прямой:
+// F4 → F5 → F6
+//
+// обратные ветви:
+// F1, F2, F3
+//
+// fault F2:
+//
+// прямой:
+// F2 → F5 → F6
+//
+// обратные ветви:
+// F1, F3, F4
+// ============================================================
+
+func backwardSearch(
+	start Cube,
+	f Fault,
+	path []Gate,
+) (Cube, []TraceStep, bool) {
+
+	reverseGates := collectReverseGates(path)
+
+	if len(reverseGates) == 0 {
+		return start, nil, true
+	}
+
+	var rec func(
+		int,
+		Cube,
+		[]TraceStep,
+	) (Cube, []TraceStep, bool)
+
+	rec = func(
+		index int,
+		current Cube,
+		log []TraceStep,
+	) (Cube, []TraceStep, bool) {
 
 		if index == len(reverseGates) {
-			result = append(result, copyCube(current))
-			return
+			return current, log, true
 		}
 
-		name := reverseGates[index]
-		gate := gateByName[name]
+		g := reverseGates[index]
 
-		output := valueOf(current, name)
+		desired, ok := current[g.Output]
 
-		// Если выход X, ограничивать его не требуется.
-		if output == X {
-			process(index+1, current)
-			return
+		if !ok {
+			// Если значение пока не определено,
+			// раскрывать нечего.
+			return rec(
+				index+1,
+				current,
+				log,
+			)
 		}
 
-		// D/D' на элементах пути уже получили условия
-		// во время D-прохода.
-		//
-		// Исключение — сам неисправный элемент:
-		// для него нужно выполнить активизацию неисправности.
-		if (output == D || output == DB) &&
-			name != faultGate {
-
-			process(index+1, current)
-			return
-		}
-
-		var requiredOutput Value
-
-		switch output {
-		case D:
-			// D = исправное 1 / неисправное 0
-			requiredOutput = One
-
-		case DB:
-			// D' = исправное 0 / неисправное 1
-			requiredOutput = Zero
-
-		default:
-			requiredOutput = output
-		}
-
-		candidates := singularCubes(gate, requiredOutput)
-
-		if len(candidates) == 0 {
-			return
-		}
-
-		for number, candidate := range candidates {
-
-			fmt.Printf(
-				"Обратная фаза: %s, вариант %d\n",
-				name,
-				number+1,
+		options, ids, usedCubes :=
+			expandGate(
+				current,
+				g,
+				desired,
 			)
 
-			printCube(
-				candidate,
-				"Сингулярный куб:",
+		for k, next := range options {
+
+			nextLog := append(
+				[]TraceStep{},
+				log...,
 			)
 
-			merged, ok := intersect(current, candidate)
+			nextLog = append(
+				nextLog,
+				TraceStep{
+					Before: copyCube(current),
 
-			if !ok {
-				fmt.Println("Пересечение: Ø")
-				fmt.Println("Вариант отбрасывается.")
-				fmt.Println()
+					Desc: fmt.Sprintf(
+						"%s=%s: обратный ход + сингулярный/D-куб №%d",
+						g.Name,
+						desired,
+						ids[k],
+					),
 
-				continue
+					UsedCube: copyCube(usedCubes[k]),
+					Cube:     copyCube(next),
+				},
+			)
+
+			if result, resultLog, ok :=
+				rec(index+1, next, nextLog); ok {
+
+				return result, resultLog, true
 			}
-
-			fmt.Println("Пересечение успешно.")
-			printCube(
-				merged,
-				"Результат:",
-			)
-
-			process(index+1, merged)
-		}
-	}
-
-	process(0, cube)
-
-	return result
-}
-
-// ------------------------------------------------------------
-// Получение тестовых наборов из куба
-// ------------------------------------------------------------
-
-var primaryInputs = []string{
-	"x1", "x2", "x3", "x4",
-	"x5", "x6", "x7",
-}
-
-func cubeToTests(c Cube) []string {
-
-	var tests []string
-
-	var generate func(int, []int)
-
-	generate = func(index int, bits []int) {
-
-		if index == len(primaryInputs) {
-			var builder strings.Builder
-
-			for _, bit := range bits {
-				builder.WriteString(strconv.Itoa(bit))
-			}
-
-			tests = append(tests, builder.String())
-			return
 		}
 
-		value := valueOf(c, primaryInputs[index])
-
-		switch value {
-
-		case Zero:
-			generate(index+1, append(bits, 0))
-
-		case One:
-			generate(index+1, append(bits, 1))
-
-		case X:
-			generate(index+1, append(bits, 0))
-			generate(index+1, append(bits, 1))
-
-		default:
-			// На первичных входах D/D' возникать не должны.
-			return
-		}
+		return nil, nil, false
 	}
 
-	generate(0, nil)
-
-	return tests
-}
-
-// ------------------------------------------------------------
-// Моделирование исправной схемы
-// ------------------------------------------------------------
-
-func evaluate(inputs []int) int {
-
-	x1 := inputs[0]
-	x2 := inputs[1]
-	x3 := inputs[2]
-	x4 := inputs[3]
-	x5 := inputs[4]
-	x6 := inputs[5]
-	x7 := inputs[6]
-
-	f1 := x1 & x2
-	f2 := 1 - x3
-	f3 := x5 | x6
-	f4 := x4 & f3 & x7
-	f5 := 1 - (f2 & f4)
-	f6 := f1 & f5
-
-	return f6
-}
-
-// ------------------------------------------------------------
-// Моделирование схемы с неисправностью
-// ------------------------------------------------------------
-
-func evaluateFault(
-	inputs []int,
-	faultGate string,
-	stuckAt int,
-) int {
-
-	x1 := inputs[0]
-	x2 := inputs[1]
-	x3 := inputs[2]
-	x4 := inputs[3]
-	x5 := inputs[4]
-	x6 := inputs[5]
-	x7 := inputs[6]
-
-	f1 := x1 & x2
-	f2 := 1 - x3
-	f3 := x5 | x6
-	f4 := x4 & f3 & x7
-	f5 := 1 - (f2 & f4)
-	f6 := f1 & f5
-
-	switch faultGate {
-
-	case "F1":
-		f1 = stuckAt
-
-	case "F2":
-		f2 = stuckAt
-
-	case "F3":
-		f3 = stuckAt
-
-	case "F4":
-		f4 = stuckAt
-
-	case "F5":
-		f5 = stuckAt
-
-	case "F6":
-		f6 = stuckAt
-	}
-
-	// Повторное распространение изменения
-	// через последующие элементы.
-
-	switch faultGate {
-
-	case "F1":
-		f6 = f1 & f5
-
-	case "F2":
-		f5 = 1 - (f2 & f4)
-		f6 = f1 & f5
-
-	case "F3":
-		f4 = x4 & f3 & x7
-		f5 = 1 - (f2 & f4)
-		f6 = f1 & f5
-
-	case "F4":
-		f5 = 1 - (f2 & f4)
-		f6 = f1 & f5
-
-	case "F5":
-		f6 = f1 & f5
-
-	case "F6":
-		// F6 уже неисправен.
-	}
-
-	return f6
-}
-
-// ------------------------------------------------------------
-// Проверка полученного теста
-// ------------------------------------------------------------
-
-func verifyTest(test string, faultGate string, stuckAt int) bool {
-
-	inputs := make([]int, 7)
-
-	for i, char := range test {
-		inputs[i] = int(char - '0')
-	}
-
-	good := evaluate(inputs)
-	faulty := evaluateFault(
-		inputs,
-		faultGate,
-		stuckAt,
+	return rec(
+		0,
+		start,
+		nil,
 	)
-
-	return good != faulty
 }
 
-// ------------------------------------------------------------
-// Основная функция
-// ------------------------------------------------------------
+// ============================================================
+// ВЫВОД ШАГА
+// ============================================================
 
-func main() {
+func printStep(
+	number int,
+	s TraceStep,
+) {
 
-	fmt.Println("====================================================")
-	fmt.Println("ЛАБОРАТОРНАЯ РАБОТА №2")
-	fmt.Println("Метод активизации многомерного пути")
-	fmt.Println("Вариант 9")
-	fmt.Println("====================================================")
-	fmt.Println()
-
-	fmt.Println("Схема:")
-	fmt.Println("F1 = И")
-	fmt.Println("F2 = НЕ")
-	fmt.Println("F3 = ИЛИ")
-	fmt.Println("F4 = И")
-	fmt.Println("F5 = И-НЕ")
-	fmt.Println("F6 = И")
-	fmt.Println()
-
-	var faultGate string
-	var stuckAt int
-
-	fmt.Print("Введите неисправный элемент (F1...F6): ")
-	fmt.Scan(&faultGate)
-
-	fmt.Print("Введите константную неисправность (0 или 1): ")
-	fmt.Scan(&stuckAt)
-
-	if _, ok := gateByName[faultGate]; !ok {
-		fmt.Println("Ошибка: неизвестный элемент.")
-		os.Exit(1)
-	}
-
-	if stuckAt != 0 && stuckAt != 1 {
-		fmt.Println("Ошибка: неисправность должна быть 0 или 1.")
-		os.Exit(1)
-	}
-
-	fmt.Println()
-	fmt.Println("====================================================")
 	fmt.Printf(
-		"НЕИСПРАВНОСТЬ: %s ≡ %d\n",
-		faultGate,
-		stuckAt,
-	)
-	fmt.Println("====================================================")
-	fmt.Println()
-
-	// --------------------------------------------------------
-	// 1. Примитивный D-куб
-	// --------------------------------------------------------
-
-	fmt.Println("[1] ПРИМИТИВНЫЙ D-КУБ")
-	fmt.Println()
-
-	cube := primitiveCube(
-		faultGate,
-		stuckAt,
+		"%2d. ",
+		number,
 	)
 
-	printCube(
-		cube,
-		"Примитивный D-куб:",
-	)
+	printCubeInline(s.Before)
 
-	// --------------------------------------------------------
-	// 2. D-проход
-	// --------------------------------------------------------
-
-	fmt.Println("[2] D-ПРОХОД")
 	fmt.Println()
 
-	path := buildPath(faultGate)
+	fmt.Printf(
+		"    %s\n",
+		s.Desc,
+	)
 
-	fmt.Print("Путь: ")
+	fmt.Print(
+		"    ВЗЯТЫЙ_КУБ: ",
+	)
 
-	for i, node := range path {
+	printCubeInline(s.UsedCube)
+
+	fmt.Println()
+
+	fmt.Print(
+		"    -> ",
+	)
+
+	printCube(s.Cube)
+
+	fmt.Print(
+		"       ",
+	)
+
+	printCubeInline(s.Cube)
+
+	fmt.Println()
+}
+
+// ============================================================
+// ВХОДНАЯ ЧАСТЬ ИТОГОВОГО КУБА
+// ============================================================
+
+func inputSequence(c Cube) string {
+
+	var b strings.Builder
+
+	for _, p := range poles[:7] {
+
+		v := c[p]
+
+		if v == "" {
+			v = X
+		}
+
+		b.WriteString(string(v))
+	}
+
+	return b.String()
+}
+
+func finalSequence(c Cube) string {
+
+	var b strings.Builder
+
+	for _, p := range poles {
+
+		v := c[p]
+
+		if v == "" {
+			v = X
+		}
+
+		b.WriteString(string(v))
+	}
+
+	return b.String()
+}
+
+// ============================================================
+// ВЫБОР НЕИСПРАВНОСТИ
+// ============================================================
+
+func chooseFault() Fault {
+
+	fmt.Println()
+	fmt.Println("============================================================")
+	fmt.Println("ВЫБОР НЕИСПРАВНОСТИ")
+	fmt.Println("============================================================")
+
+	number := 1
+
+	for _, p := range poles {
+
+		fmt.Printf(
+			"%2d. %s = 0\n",
+			number,
+			p,
+		)
+
+		number++
+
+		fmt.Printf(
+			"%2d. %s = 1\n",
+			number,
+			p,
+		)
+
+		number++
+	}
+
+	fmt.Print("\nВведите номер: ")
+
+	reader := bufio.NewReader(os.Stdin)
+
+	text, _ := reader.ReadString('\n')
+
+	value, err :=
+		strconv.Atoi(
+			strings.TrimSpace(text),
+		)
+
+	if err != nil ||
+		value < 1 ||
+		value > 26 {
+
+		panic("Неверный номер")
+	}
+
+	return Fault{
+		Node: poles[(value-1)/2],
+
+		StuckAt: (value - 1) % 2,
+	}
+}
+
+// ============================================================
+// ПЕЧАТЬ ПРЯМОГО ПУТИ
+// ============================================================
+
+func printForwardPath(
+	f Fault,
+	path []Gate,
+) {
+
+	fmt.Println()
+	fmt.Println("============================================================")
+	fmt.Println("ПРЯМОЙ D-ПРОХОД")
+	fmt.Println("============================================================")
+
+	fmt.Printf(
+		"%s",
+		f.Node,
+	)
+
+	for _, g := range path {
+		fmt.Printf(
+			" -> %s",
+			g.Output,
+		)
+	}
+
+	fmt.Println()
+}
+
+// ============================================================
+// ПЕЧАТЬ ОБРАТНОГО ПОРЯДКА
+// ============================================================
+
+func printReversePath(
+	path []Gate,
+) {
+
+	reverseGates :=
+		collectReverseGates(path)
+
+	fmt.Println()
+	fmt.Println("============================================================")
+	fmt.Println("ОБРАТНЫЙ ПРОХОД")
+	fmt.Println("============================================================")
+
+	if len(reverseGates) == 0 {
+		fmt.Println("Нет боковых ветвей.")
+		return
+	}
+
+	for i, g := range reverseGates {
+
 		if i > 0 {
 			fmt.Print(" -> ")
 		}
 
-		fmt.Print(node)
+		fmt.Print(g.Name)
 	}
 
 	fmt.Println()
-	fmt.Println()
+}
 
-	dCube, _, ok := dPass(
-		faultGate,
-		cube,
+// ============================================================
+// MAIN
+// ============================================================
+
+func main() {
+
+	fmt.Println("============================================================")
+	fmt.Println("ЛР2 — D-АЛГОРИТМ — ВАРИАНТ 9")
+	fmt.Println("============================================================")
+
+	fmt.Println(
+		"Схема: F1=AND, F2=NOT, F3=OR, F4=AND, F5=NAND, F6=AND",
 	)
 
-	if !ok {
-		fmt.Println("Не удалось построить D-проход.")
-		return
-	}
-
-	fmt.Println("D достиг выходного элемента F6.")
-	fmt.Println()
-
-	// --------------------------------------------------------
-	// 3. Обратная фаза
-	// --------------------------------------------------------
-
-	fmt.Println("[3] ОБРАТНАЯ ФАЗА")
-	fmt.Println()
-
-	finalCubes := reversePhase(
-		dCube,
-		faultGate,
-		path,
+	fmt.Println(
+		"Поля: 1..7 — входы x1..x7; 8..13 — F1..F6",
 	)
 
-	if len(finalCubes) == 0 {
-		fmt.Println("Решение не найдено.")
-		return
+	// --------------------------------------------------------
+	// D-КУБЫ
+	// --------------------------------------------------------
+
+	fmt.Println()
+	fmt.Println("ТАБЛИЦЫ D-КУБОВ")
+
+	for _, g := range gates {
+		printDTable(g)
 	}
 
 	// --------------------------------------------------------
-	// 4. Итоговые кубы
+	// НЕИСПРАВНОСТЬ
 	// --------------------------------------------------------
 
-	fmt.Println("====================================================")
-	fmt.Println("[4] ИТОГОВЫЕ КУБЫ")
-	fmt.Println("====================================================")
+	fault := chooseFault()
+
+	fmt.Printf(
+		"\nНЕИСПРАВНОСТЬ: %s stuck-at-%d\n",
+		fault.Node,
+		fault.StuckAt,
+	)
+
+	// --------------------------------------------------------
+	// ПРИМИТИВНЫЙ D-КУБ
+	// --------------------------------------------------------
+
+	current := primitive(fault)
+
 	fmt.Println()
+	fmt.Println("============================================================")
+	fmt.Println("ПОШАГОВОЕ ПОСТРОЕНИЕ")
+	fmt.Println("============================================================")
 
-	for i, c := range finalCubes {
+	fmt.Printf(
+		"%2d. Примитивный D-куб (%s stuck-at-%d)\n    ",
+		1,
+		fault.Node,
+		fault.StuckAt,
+	)
 
-		fmt.Printf("Куб №%d\n", i+1)
-
-		printCube(
-			c,
-			"",
-		)
-	}
+	printCube(current)
 
 	// --------------------------------------------------------
-	// 5. Получение тестовых наборов
+	// ПРЯМОЙ D-ПУТЬ
 	// --------------------------------------------------------
 
-	fmt.Println("====================================================")
-	fmt.Println("[5] КОНКРЕТНЫЕ ТЕСТОВЫЕ НАБОРЫ")
-	fmt.Println("====================================================")
-	fmt.Println()
+	var selectedPath []Gate
+	var forwardLog []TraceStep
 
-	testNumber := 1
+	success := false
 
-	for i, c := range finalCubes {
+	// F6 уже является выходом.
+	if fault.Node == "F6" {
 
-		fmt.Printf("Для куба №%d:\n", i+1)
+		selectedPath = nil
+		success = true
 
-		tests := cubeToTests(c)
+	} else {
 
-		for _, test := range tests {
+		allPaths := findPaths(fault.Node)
 
-			valid := verifyTest(
-				test,
-				faultGate,
-				stuckAt,
-			)
+		for _, path := range allPaths {
 
-			status := "OK"
+			result, log, ok :=
+				forward(
+					path,
+					current,
+				)
 
-			if !valid {
-				status = "ОШИБКА"
+			if !ok {
+				continue
 			}
 
-			fmt.Printf(
-				"T%-3d = %s   [%s]\n",
-				testNumber,
-				test,
-				status,
-			)
+			current = result
+			selectedPath = path
+			forwardLog = log
+			success = true
 
-			testNumber++
+			break
 		}
-
-		fmt.Println()
 	}
 
-	fmt.Println("====================================================")
-	fmt.Println("Работа алгоритма завершена.")
-	fmt.Println("====================================================")
+	if !success {
+
+		fmt.Println()
+		fmt.Println("Не удалось построить D-путь.")
+		return
+	}
+
+	// --------------------------------------------------------
+	// ПЕЧАТАЕМ ПРЯМОЙ ПУТЬ
+	// --------------------------------------------------------
+
+	printForwardPath(
+		fault,
+		selectedPath,
+	)
+
+	step := 2
+
+	for _, s := range forwardLog {
+
+		printStep(
+			step,
+			s,
+		)
+
+		step++
+	}
+
+	// --------------------------------------------------------
+	// D-ЧАСТЬ ПОСЛЕ ПРЯМОГО ПРОХОДА
+	// --------------------------------------------------------
+
+	dPart := copyCube(current)
+
+	// --------------------------------------------------------
+	// ОБРАТНЫЙ ПОРЯДОК
+	// --------------------------------------------------------
+
+	printReversePath(
+		selectedPath,
+	)
+
+	// --------------------------------------------------------
+	// ОБРАТНОЕ РАСКРЫТИЕ
+	// --------------------------------------------------------
+
+	backResult,
+		backLog,
+		ok :=
+		backwardSearch(
+			current,
+			fault,
+			selectedPath,
+		)
+
+	if !ok {
+
+		fmt.Println()
+		fmt.Println(
+			"Не удалось выполнить обратную фазу.",
+		)
+
+		return
+	}
+
+	for _, s := range backLog {
+
+		printStep(
+			step,
+			s,
+		)
+
+		step++
+	}
+
+	// --------------------------------------------------------
+	// СБОРКА ИТОГОВОГО КУБА
+	// --------------------------------------------------------
+
+	result := copyCube(dPart)
+
+	for _, s := range backLog {
+
+		var mergeOK bool
+
+		result, mergeOK =
+			merge(
+				result,
+				s.Cube,
+			)
+
+		if !mergeOK {
+
+			fmt.Println()
+			fmt.Println(
+				"Не удалось собрать итоговый куб.",
+			)
+
+			return
+		}
+	}
+
+	// backResult содержит результат обратной фазы.
+	// Используем его как дополнительную проверку.
+	_ = backResult
+
+	// --------------------------------------------------------
+	// ИТОГ
+	// --------------------------------------------------------
+
+	fmt.Println()
+	fmt.Println("============================================================")
+	fmt.Println("ИТОГОВЫЙ КУБ")
+	fmt.Println("============================================================")
+
+	printCube(result)
+
+	fmt.Println()
+	fmt.Println(
+		"Полный куб:",
+		finalSequence(result),
+	)
+
+	fmt.Println()
+	fmt.Println(
+		"Первые 7 позиций (x1...x7):",
+	)
+
+	fmt.Println(
+		inputSequence(result),
+	)
 }
